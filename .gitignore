@@ -1,0 +1,8 @@
+firmware/
+.venv/
+.venv312/
+__pycache__/
+*.pyc
+.DS_Store
+*.bin
+!firmware-builds/*.uf2
