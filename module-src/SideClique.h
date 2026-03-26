@@ -6,6 +6,7 @@
 
 #include "mesh/SinglePortModule.h"
 #include "concurrency/OSThread.h"
+#include "BBSChess.h"
 
 // Clique message types
 #define SC_MSG_BEACON    0x01
@@ -96,6 +97,7 @@ enum SCMenuState : uint8_t {
     SC_STATE_LISTS,
     SC_STATE_RALLY,
     SC_STATE_SETUP,
+    SC_STATE_CHESS,
     SC_STATE_WORDLE,
 };
 
@@ -104,6 +106,7 @@ struct SCSession {
     SCMenuState state;
     uint32_t    lastActivity;
     uint32_t    dmSendTo;    // target for DM being composed
+    uint32_t    chessGameId; // active chess game (0=none)
 };
 
 // ─── Module ─────────────────────────────────────────────────────────────

@@ -1,6 +1,7 @@
 #!/bin/bash
 # SideClique Integration Script
-# Copies module source files into the Meshtastic firmware tree
+# Copies ONLY SideClique module files into the Meshtastic firmware tree
+# No TinyBBS games, no survival guide, no wordle — just P2P mesh comms
 
 set -e
 
@@ -13,15 +14,33 @@ MODULES_CPP="$FIRMWARE_MODULES/Modules.cpp"
 
 echo "=== SideClique Integration ==="
 
-# Copy module source files
-echo "Copying module files..."
+# Remove any TinyBBS leftovers
+echo "Cleaning TinyBBS leftovers..."
+rm -f "$FIRMWARE_MODULES"/BBS*.h "$FIRMWARE_MODULES"/BBS*.cpp
+rm -f "$FIRMWARE_MODULES"/Fallout*.h "$FIRMWARE_MODULES"/Fallout*.cpp
+rm -f "$FIRMWARE_MODULES"/MudGame*.h "$FIRMWARE_MODULES"/MudGame*.cpp
+rm -f "$FIRMWARE_MODULES"/MudWorld*.h
+sed -i '' '/#include "BBSModule_v2.h"/d' "$MODULES_CPP" 2>/dev/null
+sed -i '' '/bbsModule = new BBSModule/d' "$MODULES_CPP" 2>/dev/null
+
+# Copy SideClique files
+echo "Copying SideClique files..."
 cp "$MODULE_SRC/SideClique.h" "$FIRMWARE_MODULES/"
 cp "$MODULE_SRC/SideClique.cpp" "$FIRMWARE_MODULES/"
+
+# External flash driver (for geo lookup + future data)
 cp "$MODULE_SRC/BBSExtFlash.h" "$FIRMWARE_MODULES/"
 cp "$MODULE_SRC/BBSExtFlash.cpp" "$FIRMWARE_MODULES/"
 cp "$MODULE_SRC/BBSPlatform.h" "$FIRMWARE_MODULES/"
+
+# Geo lookup (optional — for city names in check-in board)
 cp "$MODULE_SRC/BBSGeoLookup.h" "$FIRMWARE_MODULES/"
 cp "$MODULE_SRC/BBSGeoDB.h" "$FIRMWARE_MODULES/"
+
+# Chess by Mail
+cp "$MODULE_SRC/BBSChess.h" "$FIRMWARE_MODULES/" 2>/dev/null
+cp "$MODULE_SRC/BBSChess.cpp" "$FIRMWARE_MODULES/" 2>/dev/null
+
 echo "✓ Module files copied"
 
 # Patch Modules.cpp
@@ -67,5 +86,6 @@ if [ -n "$SETUP_MODULES_LINE" ]; then
 fi
 
 echo ""
-echo "=== Integration Complete ==="
+echo "=== SideClique Integration Complete ==="
+echo "Files: SideClique.h/.cpp, BBSExtFlash.h/.cpp, BBSPlatform.h, BBSGeoLookup.h, BBSGeoDB.h"
 echo "Next: cd firmware && pio run -e t-echo"

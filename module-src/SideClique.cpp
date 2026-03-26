@@ -311,6 +311,7 @@ void SideClique::sendMainMenu(const meshtastic_MeshPacket &req) {
              "[P]ing member\n"
              "[F]ind member\n"
              "[!]SOS\n"
+             "[K]Chess by Mesh\n"
              "[X]Exit",
              memberCount_);
     sendReply(req, menu);
@@ -400,6 +401,11 @@ ProcessMessage SideClique::handleStateMain(const meshtastic_MeshPacket &mp, SCSe
         case 'f': {
             sendReply(mp, "Find member — enter name:\n(LOCATE will broadcast their GPS every 60s)");
             // TODO: implement LOCATE state
+            break;
+        }
+        case 'k': {
+            // Chess — TODO: refactor BBSChess to be standalone
+            sendReply(mp, "Chess coming soon!");
             break;
         }
         case '!': {
