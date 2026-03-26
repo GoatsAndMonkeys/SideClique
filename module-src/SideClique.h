@@ -37,8 +37,9 @@
 #define SC_STATUS_SOS      6
 
 // Limits
-#define SC_MAX_MEMBERS     16
-#define SC_MAX_DM_QUEUE    32
+#define SC_MAX_CLIQUES     8       // max channels = max cliques
+#define SC_MAX_MEMBERS     16      // per clique
+#define SC_MAX_DM_QUEUE    32      // total across all cliques
 #define SC_MAX_BULLETINS   20
 #define SC_MAX_RALLY       8
 #define SC_BEACON_INTERVAL_S  900  // 15 minutes
@@ -85,6 +86,18 @@ struct SCBulletin {
     char     text[160];
 };
 
+// A clique = one encrypted Meshtastic channel
+// Protocol traffic uses port 256 (PRIVATE_APP) — invisible to Meshtastic app
+// Human chat uses port 1 (TEXT_MESSAGE_APP) — visible in app
+struct SCClique {
+    uint8_t  channelIndex;     // 0-7
+    bool     active;           // has PSK = active clique
+    char     name[16];         // channel name
+    SCMember members[SC_MAX_MEMBERS];
+    uint8_t  memberCount;
+    uint32_t mySeq;            // our message sequence counter for this clique
+};
+
 // Menu states
 enum SCMenuState : uint8_t {
     SC_STATE_IDLE = 0,
@@ -113,10 +126,9 @@ struct SCSession {
 
 class SideClique : public SinglePortModule, private concurrency::OSThread {
   private:
-    SCMember    members_[SC_MAX_MEMBERS];
-    uint8_t     memberCount_ = 0;
+    SCClique    cliques_[SC_MAX_CLIQUES]; // one per encrypted channel
+    uint8_t     activeCliques_ = 0;
     SCSession   sessions_[SC_MAX_SESSIONS];
-    uint32_t    mySeq_ = 0;       // our message sequence counter
     uint32_t    lastBeacon_ = 0;
     bool        initialized_ = false;
     bool        locateMode_ = false;
@@ -126,9 +138,15 @@ class SideClique : public SinglePortModule, private concurrency::OSThread {
     SCSession *getOrCreateSession(uint32_t nodeNum);
     void expireSessions(uint32_t now);
 
+    // Clique management
+    void scanCliques();
+    SCClique *getClique(uint8_t channelIndex);
+
     // Member management
     SCMember *findMember(uint32_t nodeNum);
+    SCMember *findMemberInClique(SCClique &clique, uint32_t nodeNum);
     SCMember *addMember(uint32_t nodeNum, const char *name, uint8_t role);
+    SCMember *addMemberToClique(SCClique &clique, uint32_t nodeNum, const char *name, uint8_t role);
     void updateMemberLocation(SCMember *m);
 
     // Sync protocol
@@ -171,6 +189,7 @@ class SideClique : public SinglePortModule, private concurrency::OSThread {
     // Helpers
     bool sendReply(const meshtastic_MeshPacket &req, const char *text);
     bool sendCliquePacket(uint8_t msgType, const uint8_t *data, size_t len, uint32_t dest = 0);
+    bool sendCliquePacketOnChannel(uint8_t msgType, const uint8_t *data, size_t len, uint8_t channel, uint32_t dest = 0);
     const char *statusStr(uint8_t status);
     const char *getNodeShortName(uint32_t nodeNum);
 

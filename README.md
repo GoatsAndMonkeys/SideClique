@@ -95,15 +95,15 @@ SideClique uses your Meshtastic primary channel encryption as the clique. If you
 ### 4. Use it
 
 ```
-SideClique: MyFamily
+SideClique [2 cliques 5 members]
 [C]heck-in board
 [D]M send
-[I]nbox
-[L]ists
-[R]ally points
-[S]OS
-[F]ind member
+[S]tatus update
 [P]ing member
+[F]ind member
+[!]SOS
+[W]ordle
+[K]Chess by Mesh
 [X]Exit
 ```
 

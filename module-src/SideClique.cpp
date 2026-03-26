@@ -27,10 +27,17 @@ static const char *STATUS_NAMES[] = {"??", "OK", "HELP", "TRVL", "HOME", "AWAY",
 // ─── Constructor / Destructor ─────────────────────────────────────────
 
 SideClique::SideClique()
-    : SinglePortModule("sclq", meshtastic_PortNum_TEXT_MESSAGE_APP),
+    : SinglePortModule("sclq", meshtastic_PortNum_PRIVATE_APP),
       concurrency::OSThread("sideclique") {
-    memset(members_, 0, sizeof(members_));
+    memset(cliques_, 0, sizeof(cliques_));
     memset(sessions_, 0, sizeof(sessions_));
+}
+
+// Accept both PRIVATE_APP (protocol) and TEXT_MESSAGE_APP (user DMs)
+bool SideClique::wantPacket(const meshtastic_MeshPacket *p) {
+    if (p->decoded.portnum == meshtastic_PortNum_PRIVATE_APP) return true;
+    if (p->decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP) return true;
+    return false;
 }
 
 SideClique::~SideClique() {}
@@ -51,21 +58,69 @@ const char *SideClique::getNodeShortName(uint32_t nodeNum) {
     return nullptr;
 }
 
+// ─── Clique management ────────────────────────────────────────────────
+
+// Scan channels and activate cliques for encrypted ones
+void SideClique::scanCliques() {
+    activeCliques_ = 0;
+    for (uint8_t i = 0; i < SC_MAX_CLIQUES; i++) {
+        meshtastic_Channel &ch = channels.getByIndex(i);
+        bool hasKey = (ch.settings.psk.size > 0);
+        bool wasActive = cliques_[i].active;
+        cliques_[i].channelIndex = i;
+        cliques_[i].active = hasKey;
+        if (hasKey) {
+            activeCliques_++;
+            if (!wasActive) {
+                // Newly activated clique
+                strncpy(cliques_[i].name, ch.settings.name, sizeof(cliques_[i].name) - 1);
+                if (cliques_[i].name[0] == '\0')
+                    snprintf(cliques_[i].name, sizeof(cliques_[i].name), "Ch%u", i);
+            }
+        }
+    }
+}
+
+SCClique *SideClique::getClique(uint8_t channelIndex) {
+    if (channelIndex >= SC_MAX_CLIQUES) return nullptr;
+    return cliques_[channelIndex].active ? &cliques_[channelIndex] : nullptr;
+}
+
 // ─── Member management ────────────────────────────────────────────────
 
 SCMember *SideClique::findMember(uint32_t nodeNum) {
-    for (uint8_t i = 0; i < memberCount_; i++) {
-        if (members_[i].nodeNum == nodeNum) return &members_[i];
+    // Search across all active cliques
+    for (uint8_t c = 0; c < SC_MAX_CLIQUES; c++) {
+        if (!cliques_[c].active) continue;
+        for (uint8_t i = 0; i < cliques_[c].memberCount; i++) {
+            if (cliques_[c].members[i].nodeNum == nodeNum) return &cliques_[c].members[i];
+        }
+    }
+    return nullptr;
+}
+
+SCMember *SideClique::findMemberInClique(SCClique &clique, uint32_t nodeNum) {
+    for (uint8_t i = 0; i < clique.memberCount; i++) {
+        if (clique.members[i].nodeNum == nodeNum) return &clique.members[i];
     }
     return nullptr;
 }
 
 SCMember *SideClique::addMember(uint32_t nodeNum, const char *name, uint8_t role) {
-    SCMember *m = findMember(nodeNum);
-    if (m) return m;
-    if (memberCount_ >= SC_MAX_MEMBERS) return nullptr;
+    // Add to first active clique (legacy — use addMemberToClique for specific)
+    for (uint8_t c = 0; c < SC_MAX_CLIQUES; c++) {
+        if (!cliques_[c].active) continue;
+        return addMemberToClique(cliques_[c], nodeNum, name, role);
+    }
+    return nullptr;
+}
 
-    m = &members_[memberCount_++];
+SCMember *SideClique::addMemberToClique(SCClique &clique, uint32_t nodeNum, const char *name, uint8_t role) {
+    SCMember *m = findMemberInClique(clique, nodeNum);
+    if (m) return m;
+    if (clique.memberCount >= SC_MAX_MEMBERS) return nullptr;
+
+    m = &clique.members[clique.memberCount++];
     memset(m, 0, sizeof(SCMember));
     m->nodeNum = nodeNum;
     m->role = role;
@@ -155,7 +210,7 @@ void SideClique::sendBeacon() {
         me->status = sosMode_ ? SC_STATUS_SOS : SC_STATUS_OK;
         me->lastSeen = getTime();
         me->battery = 0; // TODO: read from powerStatus
-        me->syncSeq = mySeq_;
+        me->syncSeq = 0; // TODO: per-clique seq
 
         const meshtastic_NodeInfoLite *myNode = nodeDB->getMeshNode(nodeDB->getNodeNum());
         if (myNode && myNode->has_position) {
@@ -175,7 +230,7 @@ void SideClique::sendBeacon() {
         memcpy(buf + 3, &me->latitude, 4);
         memcpy(buf + 7, &me->longitude, 4);
         memcpy(buf + 11, &me->altitude, 4);
-        memcpy(buf + 15, &mySeq_, 4);
+        uint32_t seq = 0; memcpy(buf + 15, &seq, 4);
     }
 
     sendCliquePacket(SC_MSG_BEACON, buf + 1, 18);
@@ -185,11 +240,20 @@ void SideClique::sendBeacon() {
 // ─── Send clique packet on encrypted channel ─────────────────────────
 
 bool SideClique::sendCliquePacket(uint8_t msgType, const uint8_t *data, size_t len, uint32_t dest) {
+    // Send on all active clique channels via port 256 (invisible back channel)
+    for (uint8_t c = 0; c < SC_MAX_CLIQUES; c++) {
+        if (!cliques_[c].active) continue;
+        sendCliquePacketOnChannel(msgType, data, len, cliques_[c].channelIndex, dest);
+    }
+    return true;
+}
+
+bool SideClique::sendCliquePacketOnChannel(uint8_t msgType, const uint8_t *data, size_t len, uint8_t channel, uint32_t dest) {
     meshtastic_MeshPacket *p = allocDataPacket();
     if (!p) return false;
 
     p->to = dest ? dest : NODENUM_BROADCAST;
-    p->channel = channels.getPrimaryIndex(); // TODO: use dedicated clique channel
+    p->channel = channel;
     p->want_ack = false;
     p->decoded.want_response = false;
 
@@ -206,26 +270,21 @@ bool SideClique::sendCliquePacket(uint8_t msgType, const uint8_t *data, size_t l
 
 // ─── Handle received packets ──────────────────────────────────────────
 
-bool SideClique::wantPacket(const meshtastic_MeshPacket *p) {
-    return SinglePortModule::wantPacket(p);
-}
 
 ProcessMessage SideClique::handleReceived(const meshtastic_MeshPacket &mp) {
     if (!mp.decoded.payload.size) return ProcessMessage::CONTINUE;
 
-    // Refuse to operate if primary channel is not encrypted
+    // Scan channels for encrypted cliques on first message
     if (!initialized_) {
-        meshtastic_Channel &primary = channels.getByIndex(channels.getPrimaryIndex());
-        bool encrypted = (primary.settings.psk.size > 0);
-        if (!encrypted) {
-            // Only warn once via DM
+        scanCliques();
+        if (activeCliques_ == 0) {
             bool isDM = (mp.to == nodeDB->getNodeNum()) && !isBroadcast(mp.to);
             if (isDM) {
                 sendReply(mp,
                     "SideClique ERROR:\n"
-                    "Primary channel is NOT encrypted.\n"
-                    "Set a PSK on your primary channel\n"
-                    "to protect your clique's data.");
+                    "No encrypted channels found.\n"
+                    "Set a PSK on at least one channel\n"
+                    "to create a clique.");
             }
             return ProcessMessage::STOP;
         }
@@ -245,22 +304,23 @@ ProcessMessage SideClique::handleReceived(const meshtastic_MeshPacket &mp) {
         return handleUserDM(mp, buf);
     }
 
-    // Broadcast: check for clique protocol messages
-    // For now, auto-add any node we hear as a member
+    // Broadcast/channel message: auto-add sender to the correct clique
     if (mp.from != nodeDB->getNodeNum()) {
-        SCMember *m = findMember(mp.from);
-        if (!m) {
-            m = addMember(mp.from, getNodeShortName(mp.from), SC_ROLE_MEMBER);
-        }
-        if (m) {
-            m->lastSeen = getTime();
-            // Update position from nodeDB
-            const meshtastic_NodeInfoLite *sender = nodeDB->getMeshNode(mp.from);
-            if (sender && sender->has_position) {
-                m->latitude = sender->position.latitude_i;
-                m->longitude = sender->position.longitude_i;
-                m->altitude = sender->position.altitude;
-                updateMemberLocation(m);
+        SCClique *clique = getClique(mp.channel);
+        if (clique) {
+            SCMember *m = findMemberInClique(*clique, mp.from);
+            if (!m) {
+                m = addMemberToClique(*clique, mp.from, getNodeShortName(mp.from), SC_ROLE_MEMBER);
+            }
+            if (m) {
+                m->lastSeen = getTime();
+                const meshtastic_NodeInfoLite *sender = nodeDB->getMeshNode(mp.from);
+                if (sender && sender->has_position) {
+                    m->latitude = sender->position.latitude_i;
+                    m->longitude = sender->position.longitude_i;
+                    m->altitude = sender->position.altitude;
+                    updateMemberLocation(m);
+                }
             }
         }
     }
@@ -302,27 +362,39 @@ ProcessMessage SideClique::dispatchState(const meshtastic_MeshPacket &mp, SCSess
 // ─── Menus ────────────────────────────────────────────────────────────
 
 void SideClique::sendMainMenu(const meshtastic_MeshPacket &req) {
+    // Count total members across all cliques
+    uint16_t totalMembers = 0;
+    for (uint8_t c = 0; c < SC_MAX_CLIQUES; c++)
+        if (cliques_[c].active) totalMembers += cliques_[c].memberCount;
+
     char menu[200];
     snprintf(menu, sizeof(menu),
-             "SideClique [%u members]\n"
+             "SideClique [%u cliques %u members]\n"
              "[C]heck-in board\n"
              "[D]M send\n"
              "[S]tatus update\n"
              "[P]ing member\n"
              "[F]ind member\n"
              "[!]SOS\n"
+             "[W]ordle\n"
              "[K]Chess by Mesh\n"
              "[X]Exit",
-             memberCount_);
+             activeCliques_, totalMembers);
     sendReply(req, menu);
 }
 
 void SideClique::sendCheckinBoard(const meshtastic_MeshPacket &req) {
-    char board[512] = "=== SideClique ===\n";
+    char board[512] = "";
     uint32_t now = getTime();
 
-    for (uint8_t i = 0; i < memberCount_; i++) {
-        SCMember &m = members_[i];
+    for (uint8_t c = 0; c < SC_MAX_CLIQUES; c++) {
+        if (!cliques_[c].active || cliques_[c].memberCount == 0) continue;
+        char hdr[32];
+        snprintf(hdr, sizeof(hdr), "=== %s ===\n", cliques_[c].name);
+        strncat(board, hdr, sizeof(board) - strlen(board) - 1);
+
+    for (uint8_t i = 0; i < cliques_[c].memberCount; i++) {
+        SCMember &m = cliques_[c].members[i];
         char line[80];
         uint32_t ago = (now > m.lastSeen) ? (now - m.lastSeen) : 0;
 
@@ -348,8 +420,10 @@ void SideClique::sendCheckinBoard(const meshtastic_MeshPacket &req) {
         strncat(board, line, sizeof(board) - strlen(board) - 1);
     }
 
-    if (memberCount_ == 0) {
-        strncat(board, "(no members yet)\n", sizeof(board) - strlen(board) - 1);
+    } // end clique loop
+
+    if (activeCliques_ == 0) {
+        strncat(board, "(no cliques active)\n", sizeof(board) - strlen(board) - 1);
     }
     strncat(board, "[X]Back", sizeof(board) - strlen(board) - 1);
     sendReply(req, board);
@@ -403,6 +477,11 @@ ProcessMessage SideClique::handleStateMain(const meshtastic_MeshPacket &mp, SCSe
             // TODO: implement LOCATE state
             break;
         }
+        case 'w': {
+            // Wordle — TODO: implement family Wordle
+            sendReply(mp, "Wordle coming soon!\nUpload wordle.bin for full dictionary.");
+            break;
+        }
         case 'k': {
             // Chess — TODO: refactor BBSChess to be standalone
             sendReply(mp, "Chess coming soon!");
@@ -445,12 +524,15 @@ ProcessMessage SideClique::handleStateDMSendTo(const meshtastic_MeshPacket &mp, 
         return ProcessMessage::STOP;
     }
 
-    // Find member by name or node ID
+    // Find member by name or node ID across all cliques
     uint32_t targetNode = 0;
-    for (uint8_t i = 0; i < memberCount_; i++) {
-        if (strncasecmp(members_[i].name, text, strlen(text)) == 0) {
-            targetNode = members_[i].nodeNum;
-            break;
+    for (uint8_t c = 0; c < SC_MAX_CLIQUES && !targetNode; c++) {
+        if (!cliques_[c].active) continue;
+        for (uint8_t i = 0; i < cliques_[c].memberCount; i++) {
+            if (strncasecmp(cliques_[c].members[i].name, text, strlen(text)) == 0) {
+                targetNode = cliques_[c].members[i].nodeNum;
+                break;
+            }
         }
     }
     if (!targetNode) {
@@ -507,7 +589,7 @@ void SideClique::queueDM(uint32_t to, const char *text) {
     }
     SCPendingDM &dm = dmQueue_[dmQueueCount_++];
     memset(&dm, 0, sizeof(dm));
-    dm.id = ++mySeq_;
+    static uint32_t dmSeqCounter = 0; dm.id = ++dmSeqCounter;
     dm.to = to;
     dm.created = getTime();
     dm.expires = getTime() + 7 * 86400; // 7 day expiry
@@ -582,9 +664,11 @@ int32_t SideClique::runOnce() {
     // Expire old sessions
     expireSessions(t);
 
-    // Check canary for all members
-    for (uint8_t i = 0; i < memberCount_; i++) {
-        SCMember &m = members_[i];
+    // Check canary for all members across all cliques
+    for (uint8_t c = 0; c < SC_MAX_CLIQUES; c++) {
+        if (!cliques_[c].active) continue;
+    for (uint8_t i = 0; i < cliques_[c].memberCount; i++) {
+        SCMember &m = cliques_[c].members[i];
         if (m.nodeNum == nodeDB->getNodeNum()) continue;
         if (m.status != SC_STATUS_SOS && m.status != SC_STATUS_UNKNOWN) {
             if (t - m.lastSeen > SC_CANARY_TIMEOUT_S) {
@@ -592,7 +676,8 @@ int32_t SideClique::runOnce() {
                 // TODO: alert admin members
             }
         }
-    }
+    } // end member loop
+    } // end clique loop
 
     return sosMode_ ? 10000 : 30000; // poll faster during SOS
 }
@@ -614,8 +699,11 @@ void SideClique::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *state, int1
     display->drawString(x, y, "SClq");
     display->setColor(OLEDDISPLAY_COLOR::WHITE);
 
+    uint16_t totalMem = 0;
+    for (uint8_t c = 0; c < SC_MAX_CLIQUES; c++)
+        if (cliques_[c].active) totalMem += cliques_[c].memberCount;
     char line[32];
-    snprintf(line, sizeof(line), "%u members", memberCount_);
+    snprintf(line, sizeof(line), "%u clq %u mem", activeCliques_, totalMem);
     display->drawString(x, y + FONT_HEIGHT_SMALL, line);
 
     uint8_t pending = 0;
