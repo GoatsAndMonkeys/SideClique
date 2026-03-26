@@ -395,6 +395,10 @@ ProcessMessage SideClique::dispatchState(const meshtastic_MeshPacket &mp, SCSess
             return handleStateDMSendBody(mp, session, text);
         case SC_STATE_WORDLE:
             return handleStateWordle(mp, session, text);
+        case SC_STATE_WASTELAD:
+            return handleStateWastelad(mp, session, text);
+        case SC_STATE_QUEST:
+            return handleStateQuest(mp, session, text);
         case SC_STATE_CHESS:
             return handleStateChess(mp, session, text);
         default:
@@ -421,6 +425,8 @@ void SideClique::sendMainMenu(const meshtastic_MeshPacket &req) {
              "[P]ing member\n"
              "[F]ind member\n"
              "[!]SOS\n"
+             "[R]Wastelad RPG\n"
+             "[Q]Daily Quest\n"
              "[W]ordle\n"
              "[K]Chess by Mesh\n"
              "[X]Exit",
@@ -527,6 +533,19 @@ ProcessMessage SideClique::handleStateMain(const meshtastic_MeshPacket &mp, SCSe
             // For now, broadcast locate for all members as a demo
             break;
         }
+        case 'r': {
+            // Wastelad RPG (full TinyBBS version)
+            session.state = SC_STATE_WASTELAD;
+            frpgEnsureDir();
+            char rpgBuf[512];
+            bool exitGame = false;
+            frpgCommand(mp.from, "", getNodeShortName(mp.from), rpgBuf, sizeof(rpgBuf), exitGame);
+            sendReply(mp, rpgBuf);
+            break;
+        }
+        case 'q':
+            doQuestStart(mp, session);
+            break;
         case 'w':
             doWordleStart(mp, session);
             break;
@@ -1015,6 +1034,29 @@ void SideClique::saveState() {}
 void SideClique::loadDMQueue() {}
 void SideClique::saveDMQueue() {}
 
+// ─── Wastelad RPG ─────────────────────────────────────────────────────
+
+ProcessMessage SideClique::handleStateWastelad(const meshtastic_MeshPacket &mp, SCSession &session, const char *text) {
+    if (!text || text[0] == '\0') {
+        session.state = SC_STATE_MAIN;
+        sendMainMenu(mp);
+        return ProcessMessage::STOP;
+    }
+
+    char rpgBuf[512];
+    bool exitGame = false;
+    frpgCommand(mp.from, text, getNodeShortName(mp.from), rpgBuf, sizeof(rpgBuf), exitGame);
+
+    if (exitGame) {
+        session.state = SC_STATE_MAIN;
+        sendReply(mp, rpgBuf);
+        sendMainMenu(mp);
+    } else {
+        sendReply(mp, rpgBuf);
+    }
+    return ProcessMessage::STOP;
+}
+
 // ─── Wordle ───────────────────────────────────────────────────────────
 
 uint32_t SideClique::wordleDay() {
@@ -1192,6 +1234,367 @@ ProcessMessage SideClique::handleStateChess(const meshtastic_MeshPacket &mp, SCS
     }
     else {
         sendChessStatus(mp, session.chessGameId);
+    }
+
+    return ProcessMessage::STOP;
+}
+
+// ─── Daily Quest (LORD-style RPG) ─────────────────────────────────────
+
+void SideClique::doQuestStart(const meshtastic_MeshPacket &req, SCSession &session) {
+    DQPlayer &p = session.questPlayer;
+    uint32_t today = wordleDay();
+
+    // Initialize new player
+    if (p.level == 0) {
+        p.nodeNum = req.from;
+        const char *sn = getNodeShortName(req.from);
+        if (sn) strncpy(p.name, sn, sizeof(p.name) - 1);
+        else snprintf(p.name, sizeof(p.name), "Hero");
+        p.level = 1;
+        p.xp = 0;
+        p.caps = 10;
+        p.weapon = 0;
+        p.armor = 0;
+        p.stimpaks = DQ_MAX_STIMPAKS;
+    }
+
+    // Reset daily actions if new day
+    if (p.lastPlayDay != today) {
+        p.lastPlayDay = today;
+        p.actionsUsed = 0;
+        p.questHp = dqPlayerMaxHp(p);
+        p.inCombat = 0;
+        p.monsterIdx = 0;
+        p.stimpaks = DQ_MAX_STIMPAKS;
+    }
+
+    session.state = SC_STATE_QUEST;
+
+    char reply[200];
+    snprintf(reply, sizeof(reply),
+             "=== %s ===\n"
+             "%s Lvl:%u HP:%u/%u\n"
+             "ATK:%u DEF:%u Gold:%u\n"
+             "XP:%u/%u Actions:%u/%u\n"
+             "[E]xplore [S]hop\n"
+             "[L]eaderboard [X]Back",
+             dqGetLocation(today),
+             p.name, p.level, p.questHp, dqPlayerMaxHp(p),
+             dqPlayerAtk(p), dqPlayerDef(p), p.caps,
+             p.xp, (p.level < DQ_MAX_LEVEL) ? DQ_XP_THRESH[p.level + 1] : 9999,
+             p.actionsUsed, DQ_MAX_ACTIONS);
+    sendReply(req, reply);
+}
+
+void SideClique::doQuestExplore(const meshtastic_MeshPacket &req, SCSession &session) {
+    DQPlayer &p = session.questPlayer;
+    uint32_t today = wordleDay();
+
+    if (p.actionsUsed >= DQ_MAX_ACTIONS) {
+        sendReply(req, "No actions left today!\nCome back tomorrow, Wastelad.");
+        return;
+    }
+    if (p.questHp == 0) {
+        sendReply(req, "You're knocked out!\nRest until tomorrow.");
+        return;
+    }
+
+    p.actionsUsed++;
+    p.monsterIdx++;
+
+    // Determine event type
+    uint8_t event = dqGetEventType(today, p.monsterIdx, p.level);
+    p.eventType = event;
+
+    char reply[200];
+    uint32_t rng = dqDaySeed(today + p.monsterIdx * 137);
+
+    switch (event) {
+        case DQ_EVENT_CHENG: {
+            // Chairman Cheng — final boss
+            p.monsterHp = (uint8_t)(DQ_CHENG.baseHp * (0.8f + p.level * 0.1f));
+            p.inCombat = 1;
+            snprintf(reply, sizeof(reply),
+                     "CHAIRMAN CHENG appears!\n"
+                     "\"You dare challenge me?\"\n"
+                     "HP:%u ATK:%u\n"
+                     "Your HP:%u/%u\n"
+                     "[A]ttack [D]efend [F]lee",
+                     p.monsterHp, (uint8_t)(DQ_CHENG.baseAtk * (0.8f + p.level * 0.1f)),
+                     p.questHp, dqPlayerMaxHp(p));
+            break;
+        }
+        case DQ_EVENT_STRANGER: {
+            // Mysterious Stranger — free weapon upgrade
+            if (p.weapon < 5) {
+                p.weapon++;
+                snprintf(reply, sizeof(reply),
+                         "The Mysterious Stranger\nappears from the fog!\n"
+                         "He hands you a %s\nand vanishes.\n"
+                         "ATK is now %u",
+                         DQ_WEAPONS[p.weapon], dqPlayerAtk(p));
+            } else {
+                p.caps += 100;
+                snprintf(reply, sizeof(reply),
+                         "The Mysterious Stranger\ntips his hat and drops\n"
+                         "a bag of caps. +100 caps");
+            }
+            break;
+        }
+        case DQ_EVENT_RAIDER: {
+            // Raider ambush — lose caps or fight
+            uint16_t stolen = p.caps / 4;
+            if (stolen < 5) stolen = 5;
+            snprintf(reply, sizeof(reply),
+                     "Raider ambush!\n"
+                     "\"Hand over %u caps or\nwe'll take 'em!\"\n"
+                     "[P]ay %u caps\n"
+                     "[F]ight the raider",
+                     stolen, stolen);
+            p.monsterHp = 20 + p.level * 3;
+            // Store stolen amount in monsterIdx temporarily
+            break;
+        }
+        case DQ_EVENT_BOS: {
+            // Brotherhood of Steel patrol — heal and buff
+            uint8_t heal = dqPlayerMaxHp(p) / 2;
+            p.questHp += heal;
+            if (p.questHp > dqPlayerMaxHp(p)) p.questHp = dqPlayerMaxHp(p);
+            p.stimpaks++;
+            snprintf(reply, sizeof(reply),
+                     "Brotherhood patrol!\n"
+                     "\"Ad Victoriam, soldier.\"\n"
+                     "They patch you up.\n"
+                     "+%u HP, +1 Stimpak\n"
+                     "HP:%u/%u",
+                     heal, p.questHp, dqPlayerMaxHp(p));
+            break;
+        }
+        case DQ_EVENT_VAULT_REP: {
+            // Vault-Tec Rep — riddle for XP
+            uint8_t ridIdx = rng % DQ_RIDDLE_COUNT;
+            p.eventType = DQ_EVENT_VAULT_REP;
+            p.monsterIdx = ridIdx; // store riddle index
+            snprintf(reply, sizeof(reply),
+                     "Vault-Tec Rep!\n"
+                     "\"Got a minute? Quiz!\"\n"
+                     "%s",
+                     DQ_RIDDLES[ridIdx].question);
+            break;
+        }
+        case DQ_EVENT_TAVERN: {
+            // Wasteland Tavern
+            uint8_t quoteIdx = rng % DQ_TAVERN_QUOTE_COUNT;
+            snprintf(reply, sizeof(reply),
+                     "=== Wasteland Tavern ===\n"
+                     "%s\n"
+                     "[G]amble 20 caps\n"
+                     "[D]rink (heal 10HP, 5caps)\n"
+                     "[L]eave",
+                     DQ_TAVERN_QUOTES[quoteIdx]);
+            break;
+        }
+        default: {
+            // Regular combat
+            DQMonster mon;
+            uint8_t monHp, monAtk;
+            dqGetMonster(today, p.monsterIdx, p.level, mon, monHp, monAtk);
+            p.monsterHp = monHp;
+            p.inCombat = 1;
+            snprintf(reply, sizeof(reply),
+                     "A %s appears! (HP:%u ATK:%u)\n"
+                     "Your HP:%u/%u\n"
+                     "[A]ttack [D]efend\n"
+                     "[F]lee [S]timpak(%u)",
+                     mon.name, monHp, monAtk,
+                     p.questHp, dqPlayerMaxHp(p),
+                     p.stimpaks);
+            break;
+        }
+    }
+    sendReply(req, reply);
+}
+
+void SideClique::doQuestCombat(const meshtastic_MeshPacket &req, SCSession &session, char action) {
+    DQPlayer &p = session.questPlayer;
+    uint32_t today = wordleDay();
+
+    if (!p.inCombat) {
+        doQuestExplore(req, session);
+        return;
+    }
+
+    DQMonster mon;
+    uint8_t monMaxHp, monAtk;
+    dqGetMonster(today, p.monsterIdx - 1, p.level, mon, monMaxHp, monAtk);
+
+    char reply[200];
+    uint8_t playerAtk = dqPlayerAtk(p);
+    uint8_t playerDef = dqPlayerDef(p);
+
+    switch (action) {
+        case 'a': {
+            // Attack
+            uint8_t dmg = playerAtk > monAtk/2 ? playerAtk - monAtk/4 : 1;
+            // Add some randomness from day seed
+            uint32_t rng = dqDaySeed(today + p.actionsUsed * 137);
+            dmg = dmg * (80 + (rng % 41)) / 100; // 80-120% damage
+            if (dmg < 1) dmg = 1;
+
+            uint8_t monDmg = monAtk > playerDef ? monAtk - playerDef/2 : 1;
+            monDmg = monDmg * (80 + ((rng >> 8) % 41)) / 100;
+            if (monDmg < 1) monDmg = 1;
+
+            if (p.monsterHp <= dmg) {
+                // Monster defeated!
+                p.monsterHp = 0;
+                p.inCombat = 0;
+                p.xp += mon.xpReward;
+                p.caps += mon.capsReward;
+
+                bool leveled = dqCheckLevelUp(p);
+                snprintf(reply, sizeof(reply),
+                         "You hit for %u! %s defeated!\n"
+                         "+%uXP +%uGold%s\n"
+                         "HP:%u/%u Actions:%u/%u",
+                         dmg, mon.name, mon.xpReward, mon.capsReward,
+                         leveled ? "\nLEVEL UP!" : "",
+                         p.questHp, dqPlayerMaxHp(p),
+                         p.actionsUsed, DQ_MAX_ACTIONS);
+                if (leveled) p.questHp = dqPlayerMaxHp(p);
+            } else {
+                p.monsterHp -= dmg;
+                if (p.questHp <= monDmg) {
+                    p.questHp = 0;
+                    p.inCombat = 0;
+                    snprintf(reply, sizeof(reply),
+                             "You hit for %u! %s hits back for %u!\n"
+                             "You are knocked out!\nRest until tomorrow.",
+                             dmg, mon.name, monDmg);
+                } else {
+                    p.questHp -= monDmg;
+                    snprintf(reply, sizeof(reply),
+                             "You:%u dmg %s:%u dmg\n"
+                             "%s HP:%u You HP:%u/%u\n"
+                             "[A]tk [D]ef [F]lee [P]ot(%u)",
+                             dmg, mon.name, monDmg,
+                             mon.name, p.monsterHp, p.questHp, dqPlayerMaxHp(p),
+                             p.stimpaks);
+                }
+            }
+            break;
+        }
+        case 'd': {
+            // Defend — take half damage, no attack
+            uint8_t monDmg = monAtk > playerDef * 2 ? (monAtk - playerDef * 2) / 2 : 0;
+            if (monDmg < 1) monDmg = 0;
+            if (p.questHp > monDmg) p.questHp -= monDmg;
+            else { p.questHp = 0; p.inCombat = 0; }
+
+            snprintf(reply, sizeof(reply),
+                     "You defend! -%u HP\n"
+                     "%s HP:%u You HP:%u/%u\n"
+                     "[A]tk [D]ef [F]lee [P]ot(%u)",
+                     monDmg, mon.name, p.monsterHp,
+                     p.questHp, dqPlayerMaxHp(p), p.stimpaks);
+            break;
+        }
+        case 'f': {
+            // Flee — 70% success
+            uint32_t rng = dqDaySeed(today + p.actionsUsed * 271);
+            if ((rng % 100) < 70) {
+                p.inCombat = 0;
+                snprintf(reply, sizeof(reply), "You fled!\nHP:%u/%u Actions:%u/%u\n[E]xplore [S]hop [X]Back",
+                         p.questHp, dqPlayerMaxHp(p), p.actionsUsed, DQ_MAX_ACTIONS);
+            } else {
+                uint8_t monDmg = monAtk > playerDef ? monAtk - playerDef/2 : 1;
+                if (p.questHp > monDmg) p.questHp -= monDmg;
+                else { p.questHp = 0; p.inCombat = 0; }
+                snprintf(reply, sizeof(reply), "Flee failed! %s hits for %u!\nHP:%u/%u\n[A]tk [D]ef [F]lee [P]ot(%u)",
+                         mon.name, monDmg, p.questHp, dqPlayerMaxHp(p), p.stimpaks);
+            }
+            break;
+        }
+        case 'p': {
+            // Stimpak
+            if (p.stimpaks == 0) {
+                snprintf(reply, sizeof(reply), "No potions left!\n[A]tk [D]ef [F]lee");
+            } else {
+                p.stimpaks--;
+                uint8_t heal = dqPlayerMaxHp(p) / 3;
+                p.questHp += heal;
+                if (p.questHp > dqPlayerMaxHp(p)) p.questHp = dqPlayerMaxHp(p);
+                snprintf(reply, sizeof(reply), "Healed %u HP!\nHP:%u/%u Stimpaks:%u\n[A]tk [D]ef [F]lee [P]ot(%u)",
+                         heal, p.questHp, dqPlayerMaxHp(p), p.stimpaks, p.stimpaks);
+            }
+            break;
+        }
+        default:
+            snprintf(reply, sizeof(reply), "[A]ttack [D]efend [F]lee [P]otion(%u)", p.stimpaks);
+            break;
+    }
+    sendReply(req, reply);
+}
+
+ProcessMessage SideClique::handleStateQuest(const meshtastic_MeshPacket &mp, SCSession &session, const char *text) {
+    if (!text || text[0] == '\0') {
+        doQuestStart(mp, session);
+        return ProcessMessage::STOP;
+    }
+
+    char cmd = tolower((unsigned char)text[0]);
+
+    if (cmd == 'x') {
+        session.state = SC_STATE_MAIN;
+        sendMainMenu(mp);
+        return ProcessMessage::STOP;
+    }
+
+    DQPlayer &p = session.questPlayer;
+
+    if (cmd == 'e' && !p.inCombat) {
+        doQuestExplore(mp, session);
+    } else if (cmd == 's' && !p.inCombat) {
+        // Shop
+        char reply[200];
+        uint16_t wpnCost = (p.weapon + 1) * 50;
+        uint16_t armCost = (p.armor + 1) * 40;
+        snprintf(reply, sizeof(reply),
+                 "=== Shop ===\n"
+                 "Gold: %u\n"
+                 "1.%s→%s (%ug)\n"
+                 "2.%s→%s (%ug)\n"
+                 "3.Stimpak (15g)\n"
+                 "[X]Back",
+                 p.caps,
+                 DQ_WEAPONS[p.weapon], p.weapon < 5 ? DQ_WEAPONS[p.weapon + 1] : "MAX", wpnCost,
+                 DQ_ARMORS[p.armor], p.armor < 5 ? DQ_ARMORS[p.armor + 1] : "MAX", armCost);
+        sendReply(mp, reply);
+    } else if (cmd == '1' && !p.inCombat) {
+        uint16_t cost = (p.weapon + 1) * 50;
+        if (p.weapon >= 5) sendReply(mp, "Weapon is maxed!");
+        else if (p.caps < cost) sendReply(mp, "Not enough gold!");
+        else { p.caps -= cost; p.weapon++; char r[60]; snprintf(r, sizeof(r), "Bought %s! ATK:%u", DQ_WEAPONS[p.weapon], dqPlayerAtk(p)); sendReply(mp, r); }
+    } else if (cmd == '2' && !p.inCombat) {
+        uint16_t cost = (p.armor + 1) * 40;
+        if (p.armor >= 5) sendReply(mp, "Armor is maxed!");
+        else if (p.caps < cost) sendReply(mp, "Not enough gold!");
+        else { p.caps -= cost; p.armor++; char r[60]; snprintf(r, sizeof(r), "Bought %s! DEF:%u", DQ_ARMORS[p.armor], dqPlayerDef(p)); sendReply(mp, r); }
+    } else if (cmd == '3' && !p.inCombat) {
+        if (p.caps < 15) sendReply(mp, "Not enough gold!");
+        else { p.caps -= 15; p.stimpaks++; char r[40]; snprintf(r, sizeof(r), "Bought potion! (%u)", p.stimpaks); sendReply(mp, r); }
+    } else if (cmd == 'l') {
+        // Leaderboard — show quest players from all sessions
+        // TODO: sync leaderboard across clique via gossip
+        char reply[200];
+        snprintf(reply, sizeof(reply), "=== Leaderboard ===\n%s Lvl:%u XP:%u Gold:%u\n(Sync coming soon)",
+                 p.name, p.level, p.xp, p.caps);
+        sendReply(mp, reply);
+    } else if (p.inCombat) {
+        doQuestCombat(mp, session, cmd);
+    } else {
+        doQuestStart(mp, session);
     }
 
     return ProcessMessage::STOP;

@@ -8,6 +8,8 @@
 #include "concurrency/OSThread.h"
 #include "BBSChess.h"
 #include "BBSWordle.h"
+#include "FalloutWastelandRPG.h"
+#include "SCDailyQuest.h"
 
 // Clique message types
 #define SC_MSG_BEACON    0x01
@@ -113,6 +115,8 @@ enum SCMenuState : uint8_t {
     SC_STATE_SETUP,
     SC_STATE_CHESS,
     SC_STATE_WORDLE,
+    SC_STATE_QUEST,
+    SC_STATE_WASTELAD,
 };
 
 struct SCSession {
@@ -125,6 +129,8 @@ struct SCSession {
     char        wordleTarget[6];
     uint8_t     wordleGuesses;
     uint32_t    wordleDay;
+    // Daily Quest
+    DQPlayer    questPlayer;
 };
 
 // ─── Module ─────────────────────────────────────────────────────────────
@@ -195,6 +201,11 @@ class SideClique : public SinglePortModule, private concurrency::OSThread {
     void doWordleStart(const meshtastic_MeshPacket &req, SCSession &session);
     void sendChessStatus(const meshtastic_MeshPacket &req, uint32_t gameId);
     uint32_t wordleDay();
+    ProcessMessage handleStateQuest(const meshtastic_MeshPacket &mp, SCSession &session, const char *text);
+    ProcessMessage handleStateWastelad(const meshtastic_MeshPacket &mp, SCSession &session, const char *text);
+    void doQuestStart(const meshtastic_MeshPacket &req, SCSession &session);
+    void doQuestExplore(const meshtastic_MeshPacket &req, SCSession &session);
+    void doQuestCombat(const meshtastic_MeshPacket &req, SCSession &session, char action);
 
     // Helpers
     bool sendReply(const meshtastic_MeshPacket &req, const char *text);
