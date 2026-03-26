@@ -84,20 +84,13 @@ Download from [Releases](../../releases) and flash:
 **Other nRF52 boards**: Enter bootloader (varies by board) → copy UF2 to mounted volume
 **If no UF2 volume appears**: Use `adafruit-nrfutil` DFU: `adafruit-nrfutil dfu serial --package firmware.zip --port /dev/cu.usbmodemXXXX --baudrate 115200`
 
-### 2. Create a clique
+### 2. Set up your encrypted channel
 
-DM the node:
-```
-!clique create MyFamily
-```
-It generates a PSK. Share it with family members.
+SideClique uses your Meshtastic primary channel encryption as the clique. If your primary channel has a PSK (encryption key), every node on that channel is automatically in the clique.
 
-### 3. Join a clique
+**No setup commands needed** — the encrypted channel IS the clique.
 
-On each family member's node:
-```
-!clique join <PSK>
-```
+> **Important**: If your primary channel is NOT encrypted, SideClique will show an error and refuse to activate. This protects your family's data from being sent in the clear.
 
 ### 4. Use it
 
@@ -118,7 +111,9 @@ SideClique: MyFamily
 
 ## Encryption & Security
 
-- **AES-256** encryption via Meshtastic PSK on a dedicated private channel
+- **AES-256** encryption via Meshtastic primary channel PSK
+- **Auto-clique** — encrypted channel = your clique. No separate setup needed
+- **Refuses to run unencrypted** — if primary channel has no PSK, SideClique shows an error
 - **Anti-replay** — sequence numbers + timestamps reject old/duplicate messages
 - **No metadata leaks** — all data stays on clique members' nodes
 - **Parental controls** — ADMIN role can remotely command MEMBER nodes

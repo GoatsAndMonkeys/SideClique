@@ -213,6 +213,25 @@ bool SideClique::wantPacket(const meshtastic_MeshPacket *p) {
 ProcessMessage SideClique::handleReceived(const meshtastic_MeshPacket &mp) {
     if (!mp.decoded.payload.size) return ProcessMessage::CONTINUE;
 
+    // Refuse to operate if primary channel is not encrypted
+    if (!initialized_) {
+        meshtastic_Channel &primary = channels.getByIndex(channels.getPrimaryIndex());
+        bool encrypted = (primary.settings.psk.size > 0);
+        if (!encrypted) {
+            // Only warn once via DM
+            bool isDM = (mp.to == nodeDB->getNodeNum()) && !isBroadcast(mp.to);
+            if (isDM) {
+                sendReply(mp,
+                    "SideClique ERROR:\n"
+                    "Primary channel is NOT encrypted.\n"
+                    "Set a PSK on your primary channel\n"
+                    "to protect your clique's data.");
+            }
+            return ProcessMessage::STOP;
+        }
+        initialized_ = true;
+    }
+
     char buf[260] = {0};
     size_t len = mp.decoded.payload.size;
     if (len > sizeof(buf) - 1) len = sizeof(buf) - 1;
