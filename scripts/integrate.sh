@@ -48,6 +48,7 @@ cp "$MODULE_SRC/BBSWordle.h" "$FIRMWARE_MODULES/" 2>/dev/null
 cp "$MODULE_SRC/FalloutWastelandRPG.h" "$FIRMWARE_MODULES/" 2>/dev/null
 cp "$MODULE_SRC/FalloutWastelandRPG.cpp" "$FIRMWARE_MODULES/" 2>/dev/null
 cp "$MODULE_SRC/SCDailyQuest.h" "$FIRMWARE_MODULES/" 2>/dev/null
+cp "$MODULE_SRC/SCHacking.h" "$FIRMWARE_MODULES/" 2>/dev/null
 
 echo "✓ Module files copied"
 

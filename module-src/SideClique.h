@@ -10,6 +10,7 @@
 #include "BBSWordle.h"
 #include "FalloutWastelandRPG.h"
 #include "SCDailyQuest.h"
+#include "SCHacking.h"
 
 // Clique message types
 #define SC_MSG_BEACON    0x01
@@ -117,6 +118,7 @@ enum SCMenuState : uint8_t {
     SC_STATE_WORDLE,
     SC_STATE_QUEST,
     SC_STATE_WASTELAD,
+    SC_STATE_HACKING,
 };
 
 struct SCSession {
@@ -131,6 +133,10 @@ struct SCSession {
     uint32_t    wordleDay;
     // Daily Quest
     DQPlayer    questPlayer;
+    // Hacking challenge
+    char        hackTarget[6];
+    uint8_t     hackAttempts;
+    uint32_t    hackDay;
 };
 
 // ─── Module ─────────────────────────────────────────────────────────────
@@ -203,6 +209,7 @@ class SideClique : public SinglePortModule, private concurrency::OSThread {
     uint32_t wordleDay();
     ProcessMessage handleStateQuest(const meshtastic_MeshPacket &mp, SCSession &session, const char *text);
     ProcessMessage handleStateWastelad(const meshtastic_MeshPacket &mp, SCSession &session, const char *text);
+    ProcessMessage handleStateHacking(const meshtastic_MeshPacket &mp, SCSession &session, const char *text);
     void doQuestStart(const meshtastic_MeshPacket &req, SCSession &session);
     void doQuestExplore(const meshtastic_MeshPacket &req, SCSession &session);
     void doQuestCombat(const meshtastic_MeshPacket &req, SCSession &session, char action);

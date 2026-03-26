@@ -395,6 +395,8 @@ ProcessMessage SideClique::dispatchState(const meshtastic_MeshPacket &mp, SCSess
             return handleStateDMSendBody(mp, session, text);
         case SC_STATE_WORDLE:
             return handleStateWordle(mp, session, text);
+        case SC_STATE_HACKING:
+            return handleStateHacking(mp, session, text);
         case SC_STATE_WASTELAD:
             return handleStateWastelad(mp, session, text);
         case SC_STATE_QUEST:
@@ -427,6 +429,7 @@ void SideClique::sendMainMenu(const meshtastic_MeshPacket &req) {
              "[!]SOS\n"
              "[R]Wastelad RPG\n"
              "[Q]Daily Quest\n"
+             "[H]ack Terminal\n"
              "[W]ordle\n"
              "[K]Chess by Mesh\n"
              "[X]Exit",
@@ -531,6 +534,20 @@ ProcessMessage SideClique::handleStateMain(const meshtastic_MeshPacket &mp, SCSe
             sendReply(mp, "LOCATE who? Enter name:\n(Will broadcast their GPS every 60s)");
             // TODO: add SC_STATE_LOCATE_TARGET state
             // For now, broadcast locate for all members as a demo
+            break;
+        }
+        case 'h': {
+            // Terminal hacking challenge
+            uint32_t today = wordleDay();
+            session.hackDay = today;
+            hackPickWordExt(today, session.hackTarget);
+            session.hackAttempts = 0;
+            session.state = SC_STATE_HACKING;
+            sendReply(mp,
+                "=== ROBCO TERMINAL ===\n"
+                "PASSWORD REQUIRED\n"
+                "4 ATTEMPTS REMAINING\n"
+                "Enter 5-letter password:");
             break;
         }
         case 'r': {
@@ -1034,6 +1051,78 @@ void SideClique::saveState() {}
 void SideClique::loadDMQueue() {}
 void SideClique::saveDMQueue() {}
 
+// ─── Terminal Hacking ──────────────────────────────────────────────────
+
+ProcessMessage SideClique::handleStateHacking(const meshtastic_MeshPacket &mp, SCSession &session, const char *text) {
+    if (!text || text[0] == '\0') {
+        sendReply(mp, "Enter 5-letter password:");
+        return ProcessMessage::STOP;
+    }
+
+    if (tolower((unsigned char)text[0]) == 'x') {
+        session.state = SC_STATE_MAIN;
+        sendMainMenu(mp);
+        return ProcessMessage::STOP;
+    }
+
+    char guess[6];
+    if (!hackValidGuess(text, guess)) {
+        sendReply(mp, "Enter exactly 5 letters.");
+        return ProcessMessage::STOP;
+    }
+
+    // Validate against dictionary
+    if (!hackValidateWord(guess)) {
+        sendReply(mp, "Not in terminal database.\nTry another word.");
+        return ProcessMessage::STOP;
+    }
+
+    session.hackAttempts++;
+    uint8_t exact = hackExactMatches(guess, session.hackTarget);
+
+    if (exact == HACK_WORD_LEN) {
+        // Success!
+        char reply[120];
+        snprintf(reply, sizeof(reply),
+                 ">%s\n"
+                 "EXACT MATCH!\n"
+                 "TERMINAL UNLOCKED\n"
+                 "Cracked in %u/%u attempts",
+                 guess, session.hackAttempts, HACK_MAX_ATTEMPTS);
+        sendReply(mp, reply);
+        session.state = SC_STATE_MAIN;
+        return ProcessMessage::STOP;
+    }
+
+    if (session.hackAttempts >= HACK_MAX_ATTEMPTS) {
+        // Lockout
+        char reply[120];
+        snprintf(reply, sizeof(reply),
+                 ">%s  %u/%u match\n"
+                 "TERMINAL LOCKED\n"
+                 "Password was: %s\n"
+                 "Try again tomorrow.",
+                 guess, exact, HACK_WORD_LEN, session.hackTarget);
+        sendReply(mp, reply);
+        session.state = SC_STATE_MAIN;
+        return ProcessMessage::STOP;
+    }
+
+    // Show feedback
+    char fb[40];
+    hackFeedback(guess, session.hackTarget, fb, sizeof(fb));
+
+    char reply[120];
+    snprintf(reply, sizeof(reply),
+             ">%s\n"
+             "Entry denied.\n"
+             "%u/%u ATTEMPTS LEFT\n"
+             "Enter password:",
+             fb, HACK_MAX_ATTEMPTS - session.hackAttempts, HACK_MAX_ATTEMPTS);
+    sendReply(mp, reply);
+    return ProcessMessage::STOP;
+}
+
 // ─── Wastelad RPG ─────────────────────────────────────────────────────
 
 ProcessMessage SideClique::handleStateWastelad(const meshtastic_MeshPacket &mp, SCSession &session, const char *text) {
@@ -1068,9 +1157,16 @@ uint32_t SideClique::wordleDay() {
 
 void SideClique::doWordleStart(const meshtastic_MeshPacket &req, SCSession &session) {
     uint32_t day = wordleDay();
-    const char *word = wordlePickWord(day);
-    strncpy(session.wordleTarget, word, 5);
-    session.wordleTarget[5] = '\0';
+    // Try external 12K dictionary, fall back to embedded
+#ifdef NRF52_SERIES
+    if (!wordlePickWordExt(day, session.wordleTarget)) {
+#endif
+        const char *word = wordlePickWord(day);
+        strncpy(session.wordleTarget, word, 5);
+        session.wordleTarget[5] = '\0';
+#ifdef NRF52_SERIES
+    }
+#endif
     session.wordleGuesses = 0;
     session.wordleDay = day;
     session.state = SC_STATE_WORDLE;
@@ -1102,9 +1198,18 @@ ProcessMessage SideClique::handleStateWordle(const meshtastic_MeshPacket &mp, SC
         return ProcessMessage::STOP;
     }
 
-    if (!wordleIsValid(guess)) {
-        sendReply(mp, "Not valid. Try again.");
-        return ProcessMessage::STOP;
+    {
+        bool valid = false;
+#ifdef NRF52_SERIES
+        if (wordleExtDictAvailable())
+            valid = wordleIsValidExt(guess);
+        else
+#endif
+            valid = wordleIsValid(guess);
+        if (!valid) {
+            sendReply(mp, "Not valid. Try again.");
+            return ProcessMessage::STOP;
+        }
     }
 
     session.wordleGuesses++;
