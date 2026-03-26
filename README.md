@@ -77,8 +77,12 @@ External flash is optional — used for city name lookups and family Wordle dict
 
 ### 1. Flash firmware
 
-Download from [Releases](../../releases) and flash via UF2:
-- Double-press reset → copy UF2 to TECHOBOOT
+Download from [Releases](../../releases) and flash:
+
+**T-Echo**: Double-press reset → copy UF2 to TECHOBOOT volume
+**RAK4631**: Double-press reset → copy UF2 to RAK4631 volume
+**Other nRF52 boards**: Enter bootloader (varies by board) → copy UF2 to mounted volume
+**If no UF2 volume appears**: Use `adafruit-nrfutil` DFU: `adafruit-nrfutil dfu serial --package firmware.zip --port /dev/cu.usbmodemXXXX --baudrate 115200`
 
 ### 2. Create a clique
 
