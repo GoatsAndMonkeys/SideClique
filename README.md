@@ -1,6 +1,6 @@
 # TinyBBS SideClique
 
-**A peer-to-peer decentralized Mesh BBS for [Meshtastic](https://meshtastic.org/).**
+**A peer-to-peer decentralized Mesh BBS for families and friend groups.**
 
 Every node is a BBS. Every member syncs with every other member. Messages, status, locations, and commands flow between your family or friend group — even when you're never all online at the same time.
 
