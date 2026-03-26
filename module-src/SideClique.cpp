@@ -352,6 +352,10 @@ ProcessMessage SideClique::dispatchState(const meshtastic_MeshPacket &mp, SCSess
             return handleStateDMSendTo(mp, session, text);
         case SC_STATE_DM_SEND_BODY:
             return handleStateDMSendBody(mp, session, text);
+        case SC_STATE_WORDLE:
+            return handleStateWordle(mp, session, text);
+        case SC_STATE_CHESS:
+            return handleStateChess(mp, session, text);
         default:
             session.state = SC_STATE_MAIN;
             sendMainMenu(mp);
@@ -477,16 +481,15 @@ ProcessMessage SideClique::handleStateMain(const meshtastic_MeshPacket &mp, SCSe
             // TODO: implement LOCATE state
             break;
         }
-        case 'w': {
-            // Wordle — TODO: implement family Wordle
-            sendReply(mp, "Wordle coming soon!\nUpload wordle.bin for full dictionary.");
+        case 'w':
+            doWordleStart(mp, session);
             break;
-        }
-        case 'k': {
-            // Chess — TODO: refactor BBSChess to be standalone
-            sendReply(mp, "Chess coming soon!");
+        case 'k':
+            chessEnsureDir();
+            session.state = SC_STATE_CHESS;
+            session.chessGameId = 0;
+            sendChessStatus(mp, 0);
             break;
-        }
         case '!': {
             // SOS
             sosMode_ = true;
@@ -688,6 +691,188 @@ void SideClique::loadState() {}
 void SideClique::saveState() {}
 void SideClique::loadDMQueue() {}
 void SideClique::saveDMQueue() {}
+
+// ─── Wordle ───────────────────────────────────────────────────────────
+
+uint32_t SideClique::wordleDay() {
+    uint32_t t = getTime();
+    int64_t adj = (int64_t)t - 9 * 3600; // 9am UTC boundary
+    if (adj < 0) return 0;
+    return (uint32_t)(adj / 86400);
+}
+
+void SideClique::doWordleStart(const meshtastic_MeshPacket &req, SCSession &session) {
+    uint32_t day = wordleDay();
+    const char *word = wordlePickWord(day);
+    strncpy(session.wordleTarget, word, 5);
+    session.wordleTarget[5] = '\0';
+    session.wordleGuesses = 0;
+    session.wordleDay = day;
+    session.state = SC_STATE_WORDLE;
+    sendReply(req, "=== Wordle ===\nGuess a 5-letter word!\n6 tries. Feedback:\nG=right Y=wrong spot X=no\n\nGuess 1/6:");
+}
+
+ProcessMessage SideClique::handleStateWordle(const meshtastic_MeshPacket &mp, SCSession &session, const char *text) {
+    if (!text || text[0] == '\0') {
+        sendReply(mp, "Enter a 5-letter word:");
+        return ProcessMessage::STOP;
+    }
+    if (tolower((unsigned char)text[0]) == 'x' || tolower((unsigned char)text[0]) == 'q') {
+        char msg[60];
+        snprintf(msg, sizeof(msg), "Quit. Word was: %s", session.wordleTarget);
+        sendReply(mp, msg);
+        session.state = SC_STATE_MAIN;
+        sendMainMenu(mp);
+        return ProcessMessage::STOP;
+    }
+
+    char guess[6] = {0};
+    int guessLen = 0;
+    for (int i = 0; text[i] && guessLen < 5; i++) {
+        if (isalpha((unsigned char)text[i]))
+            guess[guessLen++] = tolower((unsigned char)text[i]);
+    }
+    if (guessLen != 5) {
+        sendReply(mp, "Enter a 5-letter word.");
+        return ProcessMessage::STOP;
+    }
+
+    if (!wordleIsValid(guess)) {
+        sendReply(mp, "Not valid. Try again.");
+        return ProcessMessage::STOP;
+    }
+
+    session.wordleGuesses++;
+
+    char fb[6] = {0};
+    wordleFeedback(guess, session.wordleTarget, fb);
+
+    char fbStr[16];
+    snprintf(fbStr, sizeof(fbStr), "%c%c%c%c%c %c%c%c%c%c",
+             guess[0],guess[1],guess[2],guess[3],guess[4],
+             fb[0],fb[1],fb[2],fb[3],fb[4]);
+
+    char reply[120];
+    if (strncmp(fb, "GGGGG", 5) == 0) {
+        snprintf(reply, sizeof(reply), "%s\nYou got it in %u/6!", fbStr, session.wordleGuesses);
+        sendReply(mp, reply);
+        session.state = SC_STATE_MAIN;
+    } else if (session.wordleGuesses >= 6) {
+        snprintf(reply, sizeof(reply), "%s\nGame over! Word: %s", fbStr, session.wordleTarget);
+        sendReply(mp, reply);
+        session.state = SC_STATE_MAIN;
+    } else {
+        snprintf(reply, sizeof(reply), "%s  Guess %u/6:", fbStr, session.wordleGuesses + 1);
+        sendReply(mp, reply);
+    }
+    return ProcessMessage::STOP;
+}
+
+// ─── Chess ────────────────────────────────────────────────────────────
+
+void SideClique::sendChessStatus(const meshtastic_MeshPacket &req, uint32_t gameId) {
+    // Simple chess menu for now
+    sendReply(req,
+              "=== Chess by Mesh ===\n"
+              "NW-New White NB-New Black\n"
+              "MV-Move (e.g. MV e2e4)\n"
+              "LB-Board AB-About\n"
+              "[X]Back to SideClique");
+}
+
+ProcessMessage SideClique::handleStateChess(const meshtastic_MeshPacket &mp, SCSession &session, const char *text) {
+    if (!text || text[0] == '\0') {
+        sendChessStatus(mp, session.chessGameId);
+        return ProcessMessage::STOP;
+    }
+
+    char cmd[8] = {0};
+    strncpy(cmd, text, 7);
+    for (char *p = cmd; *p; p++) *p = toupper((unsigned char)*p);
+
+    if (strcmp(cmd, "X") == 0) {
+        session.state = SC_STATE_MAIN;
+        sendMainMenu(mp);
+        return ProcessMessage::STOP;
+    }
+
+    char reply[200] = {0};
+
+    if (strncmp(cmd, "NW", 2) == 0 || strncmp(cmd, "NB", 2) == 0) {
+        // New game
+        BBSChessGame game;
+        memset(&game, 0, sizeof(game));
+        game.id = chessNextGameId();
+        game.whiteNode = (cmd[1] == 'W') ? mp.from : 0;
+        game.blackNode = (cmd[1] == 'B') ? mp.from : 0;
+        game.difficulty = 1; // medium
+        game.toMove = 0; // white
+        game.status = 0;
+        game.castling = 0x0F; // all castling available
+        game.enPassantFile = -1;
+        chessBoardInit(game.board);
+        chessSaveGame(game);
+        session.chessGameId = game.id;
+
+        // If AI goes first (player is black), make AI move
+        if (game.blackNode == 0 && cmd[1] == 'B') {
+            // AI is white, goes first
+            char aiMove[8];
+            if (chessAIMove(game, aiMove)) {
+                chessApplyMove(game, aiMove);
+                chessSaveGame(game);
+            }
+        }
+        chessBuildBoard(game, reply, sizeof(reply), cmd[1] == 'W');
+        sendReply(mp, reply);
+    }
+    else if (strncmp(cmd, "MV", 2) == 0) {
+        // Move
+        if (session.chessGameId == 0) {
+            sendReply(mp, "No active game. NW or NB to start.");
+            return ProcessMessage::STOP;
+        }
+        BBSChessGame game;
+        if (!chessLoadGame(session.chessGameId, game)) {
+            sendReply(mp, "Game not found.");
+            return ProcessMessage::STOP;
+        }
+        const char *move = text + 2;
+        while (*move == ' ') move++;
+        if (!chessApplyMove(game, move)) {
+            sendReply(mp, "Invalid move. Use format: e2e4");
+            return ProcessMessage::STOP;
+        }
+        // AI response
+        char aiMove[8];
+        if (game.status == 0 && chessAIMove(game, aiMove)) {
+            chessApplyMove(game, aiMove);
+        }
+        chessSaveGame(game);
+        chessBuildBoard(game, reply, sizeof(reply), game.whiteNode == mp.from);
+        sendReply(mp, reply);
+    }
+    else if (strncmp(cmd, "LB", 2) == 0) {
+        // Show board
+        if (session.chessGameId == 0) {
+            sendReply(mp, "No active game.");
+            return ProcessMessage::STOP;
+        }
+        BBSChessGame game;
+        if (chessLoadGame(session.chessGameId, game)) {
+            chessBuildBoard(game, reply, sizeof(reply), game.whiteNode == mp.from);
+            sendReply(mp, reply);
+        }
+    }
+    else if (strncmp(cmd, "AB", 2) == 0) {
+        sendReply(mp, "Chess by Mesh\nAlpha-beta AI\nMV e2e4 to move\nNW=play white NB=black");
+    }
+    else {
+        sendChessStatus(mp, session.chessGameId);
+    }
+
+    return ProcessMessage::STOP;
+}
 
 // ─── UI Frame ─────────────────────────────────────────────────────────
 

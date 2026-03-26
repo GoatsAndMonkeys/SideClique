@@ -7,6 +7,7 @@
 #include "mesh/SinglePortModule.h"
 #include "concurrency/OSThread.h"
 #include "BBSChess.h"
+#include "BBSWordle.h"
 
 // Clique message types
 #define SC_MSG_BEACON    0x01
@@ -120,6 +121,10 @@ struct SCSession {
     uint32_t    lastActivity;
     uint32_t    dmSendTo;    // target for DM being composed
     uint32_t    chessGameId; // active chess game (0=none)
+    // Wordle
+    char        wordleTarget[6];
+    uint8_t     wordleGuesses;
+    uint32_t    wordleDay;
 };
 
 // ─── Module ─────────────────────────────────────────────────────────────
@@ -185,6 +190,11 @@ class SideClique : public SinglePortModule, private concurrency::OSThread {
     ProcessMessage handleStateDMList(const meshtastic_MeshPacket &mp, SCSession &session, const char *text);
     ProcessMessage handleStateDMSendTo(const meshtastic_MeshPacket &mp, SCSession &session, const char *text);
     ProcessMessage handleStateDMSendBody(const meshtastic_MeshPacket &mp, SCSession &session, const char *text);
+    ProcessMessage handleStateWordle(const meshtastic_MeshPacket &mp, SCSession &session, const char *text);
+    ProcessMessage handleStateChess(const meshtastic_MeshPacket &mp, SCSession &session, const char *text);
+    void doWordleStart(const meshtastic_MeshPacket &req, SCSession &session);
+    void sendChessStatus(const meshtastic_MeshPacket &req, uint32_t gameId);
+    uint32_t wordleDay();
 
     // Helpers
     bool sendReply(const meshtastic_MeshPacket &req, const char *text);

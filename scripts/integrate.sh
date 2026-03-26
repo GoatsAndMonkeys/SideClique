@@ -41,6 +41,9 @@ cp "$MODULE_SRC/BBSGeoDB.h" "$FIRMWARE_MODULES/"
 cp "$MODULE_SRC/BBSChess.h" "$FIRMWARE_MODULES/" 2>/dev/null
 cp "$MODULE_SRC/BBSChess.cpp" "$FIRMWARE_MODULES/" 2>/dev/null
 
+# Wordle
+cp "$MODULE_SRC/BBSWordle.h" "$FIRMWARE_MODULES/" 2>/dev/null
+
 echo "✓ Module files copied"
 
 # Patch Modules.cpp
