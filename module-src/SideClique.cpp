@@ -325,6 +325,47 @@ ProcessMessage SideClique::handleReceived(const meshtastic_MeshPacket &mp) {
         }
     }
 
+    // Dispatch protocol messages on port 256 (invisible back channel)
+    if (mp.decoded.portnum == meshtastic_PortNum_PRIVATE_APP && len >= 1) {
+        uint8_t msgType = (uint8_t)buf[0];
+        const uint8_t *payload = (const uint8_t *)buf + 1;
+        size_t payloadLen = len - 1;
+
+        switch (msgType) {
+            case SC_MSG_BEACON:
+                handleBeacon(mp, payload, payloadLen);
+                break;
+            case SC_MSG_SYNC_REQ:
+                handleSyncReq(mp, payload, payloadLen);
+                break;
+            case SC_MSG_SYNC_DATA:
+                handleSyncData(mp, payload, payloadLen);
+                break;
+            case SC_MSG_DM:
+                handleCliqueDM(mp, payload, payloadLen);
+                break;
+            case SC_MSG_DM_ACK:
+                handleDMAck(mp, payload, payloadLen);
+                break;
+            case SC_MSG_LOCATE:
+                handleLocate(mp, payload, payloadLen);
+                break;
+            case SC_MSG_PING:
+                handlePing(mp, payload, payloadLen);
+                break;
+            case SC_MSG_ALERT:
+                handleAlert(mp, payload, payloadLen);
+                break;
+            case SC_MSG_SOS:
+                handleSOS(mp, payload, payloadLen);
+                break;
+            case SC_MSG_STATUS:
+                handleStatusUpdate(mp, payload, payloadLen);
+                break;
+        }
+        return ProcessMessage::STOP;
+    }
+
     return ProcessMessage::CONTINUE;
 }
 
@@ -472,13 +513,18 @@ ProcessMessage SideClique::handleStateMain(const meshtastic_MeshPacket &mp, SCSe
             break;
         }
         case 'p': {
-            // Ping — show all members with quick status
+            // Ping a member — next message should be their name
+            sendReply(mp, "Ping who? Enter name:");
+            // For now just show checkin board as ping response
+            // TODO: add SC_STATE_PING_TARGET state
             sendCheckinBoard(mp);
             break;
         }
         case 'f': {
-            sendReply(mp, "Find member — enter name:\n(LOCATE will broadcast their GPS every 60s)");
-            // TODO: implement LOCATE state
+            // Find/LOCATE a member
+            sendReply(mp, "LOCATE who? Enter name:\n(Will broadcast their GPS every 60s)");
+            // TODO: add SC_STATE_LOCATE_TARGET state
+            // For now, broadcast locate for all members as a demo
             break;
         }
         case 'w':
@@ -491,12 +537,42 @@ ProcessMessage SideClique::handleStateMain(const meshtastic_MeshPacket &mp, SCSe
             sendChessStatus(mp, 0);
             break;
         case '!': {
-            // SOS
-            sosMode_ = true;
-            SCMember *me = findMember(nodeDB->getNodeNum());
-            if (me) me->status = SC_STATUS_SOS;
-            sendBeacon();
-            sendReply(mp, "SOS ACTIVATED\nBroadcasting position every 30s\nAll members alerted");
+            // SOS — check if followed by a name (remote SOS) or standalone (self SOS)
+            const char *target = text + 1;
+            while (*target == ' ') target++;
+            if (*target) {
+                // Remote SOS: "! Alex" → send SOS to Alex's node
+                uint32_t targetNode = 0;
+                for (uint8_t c = 0; c < SC_MAX_CLIQUES && !targetNode; c++) {
+                    if (!cliques_[c].active) continue;
+                    for (uint8_t i = 0; i < cliques_[c].memberCount; i++) {
+                        if (strncasecmp(cliques_[c].members[i].name, target, strlen(target)) == 0) {
+                            targetNode = cliques_[c].members[i].nodeNum;
+                            break;
+                        }
+                    }
+                }
+                if (targetNode) {
+                    uint8_t sosBuf[4];
+                    memcpy(sosBuf, &targetNode, 4);
+                    sendCliquePacket(SC_MSG_SOS, sosBuf, 4);
+                    SCMember *tm = findMember(targetNode);
+                    char reply[80];
+                    snprintf(reply, sizeof(reply), "Remote SOS sent to %s\nTheir node will broadcast position",
+                             tm ? tm->name : "???");
+                    sendReply(mp, reply);
+                } else {
+                    sendReply(mp, "Member not found for remote SOS.");
+                }
+            } else {
+                // Self SOS
+                sosMode_ = true;
+                locateMode_ = true;
+                SCMember *me = findMember(nodeDB->getNodeNum());
+                if (me) me->status = SC_STATUS_SOS;
+                sendBeacon();
+                sendReply(mp, "SOS ACTIVATED\nBroadcasting position every 30s\nAll members alerted\n\nSend !cancel to stop");
+            }
             break;
         }
         case 'x':
@@ -645,6 +721,253 @@ void SideClique::retryPendingDMs(uint32_t now) {
             }
         }
     }
+}
+
+// ─── Protocol handlers (Phase 2) ──────────────────────────────────────
+
+void SideClique::handleBeacon(const meshtastic_MeshPacket &mp, const uint8_t *data, size_t len) {
+    if (len < 18 || mp.from == nodeDB->getNodeNum()) return;
+
+    SCClique *clique = getClique(mp.channel);
+    if (!clique) return;
+
+    // Parse beacon: status(1) + battery(1) + lat(4) + lon(4) + alt(4) + seq(4)
+    uint8_t status = data[0];
+    uint8_t battery = data[1];
+    int32_t lat, lon, alt;
+    uint32_t seq;
+    memcpy(&lat, data + 2, 4);
+    memcpy(&lon, data + 6, 4);
+    memcpy(&alt, data + 10, 4);
+    memcpy(&seq, data + 14, 4);
+
+    SCMember *m = findMemberInClique(*clique, mp.from);
+    if (!m) m = addMemberToClique(*clique, mp.from, getNodeShortName(mp.from), SC_ROLE_MEMBER);
+    if (!m) return;
+
+    m->status = status;
+    m->battery = battery;
+    m->latitude = lat;
+    m->longitude = lon;
+    m->altitude = alt;
+    m->syncSeq = seq;
+    m->lastSeen = getTime();
+    updateMemberLocation(m);
+
+    // If this member has pending DMs, send them now
+    retryPendingDMs(getTime());
+}
+
+void SideClique::handleSyncReq(const meshtastic_MeshPacket &mp, const uint8_t *data, size_t len) {
+    // TODO Phase 2: vector clock comparison + delta sync
+    (void)mp; (void)data; (void)len;
+}
+
+void SideClique::handleSyncData(const meshtastic_MeshPacket &mp, const uint8_t *data, size_t len) {
+    // TODO Phase 2: receive and store synced messages
+    (void)mp; (void)data; (void)len;
+}
+
+void SideClique::handleCliqueDM(const meshtastic_MeshPacket &mp, const uint8_t *data, size_t len) {
+    if (len < 5) return; // min: to(4) + text(1)
+
+    uint32_t toNode;
+    memcpy(&toNode, data, 4);
+
+    // Is this DM for us?
+    if (toNode == nodeDB->getNodeNum()) {
+        // Deliver to our inbox
+        char text[160] = {0};
+        size_t textLen = len - 4;
+        if (textLen > 159) textLen = 159;
+        memcpy(text, data + 4, textLen);
+
+        const char *fromName = getNodeShortName(mp.from);
+        char notify[200];
+        snprintf(notify, sizeof(notify), "DM from %s:\n%s",
+                 fromName ? fromName : "???", text);
+
+        // Send ACK back
+        uint8_t ackData[4];
+        memcpy(ackData, &mp.id, 4); // echo the message ID
+        sendCliquePacketOnChannel(SC_MSG_DM_ACK, ackData, 4, mp.channel, mp.from);
+
+        // TODO: store in inbox, notify via screen/buzzer
+        LOG_INFO("[SC] DM from %s: %s\n", fromName ? fromName : "???", text);
+    } else {
+        // Not for us — store for relay if we see the target later
+        // TODO Phase 2: relay queue
+    }
+}
+
+void SideClique::handleDMAck(const meshtastic_MeshPacket &mp, const uint8_t *data, size_t len) {
+    if (len < 4) return;
+    uint32_t ackedMsgId;
+    memcpy(&ackedMsgId, data, 4);
+
+    // Mark matching queued DM as delivered
+    for (uint8_t i = 0; i < dmQueueCount_; i++) {
+        if (dmQueue_[i].to == mp.from && dmQueue_[i].status < 2) {
+            dmQueue_[i].status = 2; // delivered
+            LOG_INFO("[SC] DM to %08x delivered\n", mp.from);
+            break;
+        }
+    }
+}
+
+void SideClique::handleStatusUpdate(const meshtastic_MeshPacket &mp, const uint8_t *data, size_t len) {
+    if (len < 1) return;
+    uint8_t newStatus = data[0];
+
+    // Update member status in all cliques they're in
+    for (uint8_t c = 0; c < SC_MAX_CLIQUES; c++) {
+        if (!cliques_[c].active) continue;
+        SCMember *m = findMemberInClique(cliques_[c], mp.from);
+        if (m) {
+            m->status = newStatus;
+            m->lastSeen = getTime();
+        }
+    }
+}
+
+// ─── Remote commands ──────────────────────────────────────────────────
+
+void SideClique::handleLocate(const meshtastic_MeshPacket &mp, const uint8_t *data, size_t len) {
+    if (len < 4) return;
+
+    uint32_t targetNode;
+    memcpy(&targetNode, data, 4);
+
+    if (targetNode != nodeDB->getNodeNum()) return; // not for us
+
+    // Check if sender has ADMIN role (parental control)
+    SCMember *sender = findMember(mp.from);
+    bool isAdmin = sender && sender->role == SC_ROLE_ADMIN;
+
+    // Activate locate mode — broadcast GPS every 60s
+    locateMode_ = true;
+    LOG_INFO("[SC] LOCATE activated by %08x (admin=%d)\n", mp.from, isAdmin);
+
+    // Send immediate position update
+    sendBeacon();
+}
+
+void SideClique::handlePing(const meshtastic_MeshPacket &mp, const uint8_t *data, size_t len) {
+    (void)data; (void)len;
+
+    // Respond with status immediately
+    SCMember *me = findMember(nodeDB->getNodeNum());
+    if (!me) return;
+
+    char reply[120];
+    snprintf(reply, sizeof(reply), "%s: %s | %u%% | %s | Up | Last:%lus ago",
+             me->name, statusStr(me->status), me->battery,
+             me->location[0] ? me->location : "no GPS",
+             (unsigned long)(getTime() - me->lastSeen));
+
+    // Reply on visible channel so sender sees it
+    meshtastic_MeshPacket *p = allocDataPacket();
+    if (!p) return;
+    p->to = mp.from;
+    p->channel = mp.channel;
+    p->want_ack = false;
+    p->decoded.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP; // visible reply
+    size_t rlen = strlen(reply);
+    if (rlen > 200) rlen = 200;
+    p->decoded.payload.size = rlen;
+    memcpy(p->decoded.payload.bytes, reply, rlen);
+    service->sendToMesh(p);
+}
+
+void SideClique::handleAlert(const meshtastic_MeshPacket &mp, const uint8_t *data, size_t len) {
+    if (len < 4) return;
+
+    uint32_t targetNode;
+    memcpy(&targetNode, data, 4);
+
+    if (targetNode != nodeDB->getNodeNum()) return; // not for us
+
+    // Extract message
+    char alertMsg[160] = {0};
+    if (len > 4) {
+        size_t msgLen = len - 4;
+        if (msgLen > 159) msgLen = 159;
+        memcpy(alertMsg, data + 4, msgLen);
+    }
+
+    const char *fromName = getNodeShortName(mp.from);
+    LOG_INFO("[SC] ALERT from %s: %s\n", fromName ? fromName : "???", alertMsg);
+
+    // TODO: activate buzzer/LED, display persistently on screen
+}
+
+void SideClique::handleSOS(const meshtastic_MeshPacket &mp, const uint8_t *data, size_t len) {
+    if (len < 1) return;
+
+    // SOS can be self-triggered (target=0) or remote (target=nodeNum)
+    uint32_t targetNode = 0;
+    if (len >= 4) memcpy(&targetNode, data, 4);
+
+    if (targetNode == 0 || targetNode == nodeDB->getNodeNum()) {
+        // SOS is for us — activate
+        SCMember *sender = findMember(mp.from);
+        bool isAdmin = sender && sender->role == SC_ROLE_ADMIN;
+
+        sosMode_ = true;
+        locateMode_ = true;
+
+        // Update our status
+        SCMember *me = findMember(nodeDB->getNodeNum());
+        if (me) me->status = SC_STATUS_SOS;
+
+        LOG_INFO("[SC] SOS activated by %08x (admin=%d, remote=%d)\n",
+                 mp.from, isAdmin, targetNode != 0);
+
+        // Broadcast SOS beacon immediately
+        sendBeacon();
+
+        // Announce on visible channel
+        const char *myName = getNodeShortName(nodeDB->getNodeNum());
+        char announce[120];
+        snprintf(announce, sizeof(announce), "SOS: %s emergency!\nBroadcasting position every 30s",
+                 myName ? myName : "???");
+
+        meshtastic_MeshPacket *p = allocDataPacket();
+        if (p) {
+            p->to = NODENUM_BROADCAST;
+            p->channel = mp.channel;
+            p->want_ack = false;
+            p->decoded.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP; // visible
+            size_t alen = strlen(announce);
+            p->decoded.payload.size = alen;
+            memcpy(p->decoded.payload.bytes, announce, alen);
+            service->sendToMesh(p);
+        }
+    }
+    // If SOS is for someone else on the mesh, relay it
+    // (handled by Meshtastic's mesh routing automatically)
+}
+
+// ─── Remote command senders (from user menu) ──────────────────────────
+
+static void buildLocatePacket(uint32_t targetNode, uint8_t *buf) {
+    memcpy(buf, &targetNode, 4);
+}
+
+static void buildSOSPacket(uint32_t targetNode, uint8_t *buf) {
+    memcpy(buf, &targetNode, 4);
+}
+
+static void buildAlertPacket(uint32_t targetNode, const char *msg, uint8_t *buf, size_t *outLen) {
+    memcpy(buf, &targetNode, 4);
+    size_t msgLen = strlen(msg);
+    if (msgLen > 155) msgLen = 155;
+    memcpy(buf + 4, msg, msgLen);
+    *outLen = 4 + msgLen;
+}
+
+static void buildPingPacket(uint32_t targetNode, uint8_t *buf) {
+    memcpy(buf, &targetNode, 4);
 }
 
 // ─── runOnce (periodic tasks) ─────────────────────────────────────────
