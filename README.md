@@ -45,12 +45,12 @@ Members share an encrypted channel (PSK). Nodes sync using a gossip protocol wit
 4. Messages propagate transitively: Dad → Mom → Alex (even if Dad and Alex never meet)
 
 ```
-┌──────────┐         ┌──────────┐         ┌──────────┐
-│   Dad    │◄──sync──►│   Mom    │◄──sync──►│  Alex   │
-│  Portland │         │  Portland │         │  Seattle  │
-│  OK  85%  │         │  OK  72%  │         │ TRVL 45% │
-└──────────┘         └──────────┘         └──────────┘
-     Dad's message to Alex reaches him through Mom
+ +-----------+        +-----------+        +-----------+
+ |    Dad    |<-sync->|    Mom    |<-sync->|   Alex    |
+ |  Portland |        |  Portland |        |  Seattle  |
+ |  OK   85% |        |  OK   72% |        |  TRVL 45% |
+ +-----------+        +-----------+        +-----------+
+      Dad's message to Alex reaches him through Mom
 ```
 
 ---
